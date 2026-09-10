@@ -263,6 +263,52 @@ If a DB already has split identities for one network, repair it with:
 | `scripts/install-sudoers.sh` | One-time sudoers entry for passwordless SDRTrunk launch/kill (validated with `visudo -c`) |
 | `scripts/radio-autopilot.py` | Optional plug-and-play HackRF manager (see below) |
 
+### Bringing up a new box
+
+Do this in order the first time, before letting the autopilot near a machine.
+
+1. **Plug in every radio, then start SDRTrunk once.** SDRTrunk writes one
+   tuner config per serial the first time it sees a radio. The scripts only
+   ever edit configs that already exist — they never create them — so a radio
+   SDRTrunk hasn't met yet is invisible to the plan.
+
+2. **Check what the box can actually see:**
+
+   ```bash
+   ./.venv/bin/python scripts/radio_plan.py
+   ```
+
+   It prints every radio on the USB bus with its serial, and every plan slot
+   with its resolved receive window. If the serials come back empty or
+   garbled, radio identification isn't working on that platform and the
+   scripts fall back to counting radios instead of naming them — still
+   functional, just less precise about which one was unplugged.
+
+3. **Edit `config/radio_plan.json`.** Confirm each slot's centre frequency
+   covers a band you actually care about — the shipped 864 MHz slot is a
+   reasonable guess at upper-800/NPSPAC coverage, not a fact about your
+   systems. Pin slots to radios with `uniqueID` if it matters which antenna
+   feeds which band.
+
+4. **Dry-run the tuner** — prints the whole assignment, writes nothing:
+
+   ```bash
+   ./.venv/bin/python scripts/tune-hackrfs.py --dry-run --no-restart
+   ```
+
+   Check that each radio landed on the slot you expected, that pins say
+   `(pinned)`, and that there are no warnings about unmatched pins or radios
+   missing from SDRTrunk's config.
+
+5. **Apply it** (drop `--dry-run`; it backs the config up first and restarts
+   SDRTrunk if it was running):
+
+   ```bash
+   ./.venv/bin/python scripts/tune-hackrfs.py
+   ```
+
+6. **Then** schedule the autopilot, once steps 2-5 look right.
+
 ### Radio autopilot (plug-and-play HackRFs)
 
 Run `scripts/radio-autopilot.py` every 60s (LaunchAgent, systemd timer, or
