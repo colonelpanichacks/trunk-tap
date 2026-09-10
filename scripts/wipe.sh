@@ -12,10 +12,12 @@ rm -rf audio_calls
 mkdir -p audio_calls
 
 if [[ "${1:-}" == "--all-logs" ]]; then
-  LOGDIR="${HOME}/SDRTrunk/event_logs"
+  LOGDIR="${SDRTRUNK_HOME:-$HOME/SDRTrunk}/event_logs"
   if [[ -d "$LOGDIR" ]]; then
     echo "wiping SDRTrunk event_logs at $LOGDIR"
     find "$LOGDIR" -type f -name '*_call_events.log' -delete
+  else
+    echo "no SDRTrunk event_logs at $LOGDIR (set SDRTRUNK_HOME if it lives elsewhere)" >&2
   fi
 fi
 

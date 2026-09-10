@@ -77,7 +77,7 @@ SQLite, WAL, indexed. Tables (see [db/schema.sql](db/schema.sql)):
 ## Quickstart
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/colonelpanichacks/trunk-tap.git
 cd trunk-tap
 ./install.sh
 ```
@@ -185,6 +185,7 @@ The event-log tail is automatic — the dashboard watches
   - `SDRTD_EXPORT_DIR` — export tree root (default
     `~/Desktop/trunk-tap-export`)
   - `SDRTD_SYSTEMS_CONFIG` — override path to `systems.json`
+  - `SDRTD_RADIO_PLAN` — override path to `radio_plan.json`
   - `SDRTRUNK_HOME` — SDRTrunk's home dir (default `~/SDRTrunk`)
   - `SDRTD_WHISPER_MODEL`, `WHISPER_CPP_BIN`, `WHISPER_CPP_MODEL`,
     `SDRTD_WHISPER_PY_MODEL`, `SDRTD_WHISPER_PROMPT` — see below
@@ -219,13 +220,26 @@ WebSocket as they finish.
 ## CLI flags
 
 ```
---host 127.0.0.1        bind address
+--host 0.0.0.0          bind address (default: all interfaces)
 --port 5544             http port
 --log-dir PATH          SDRTrunk event_logs to tail (default ~/SDRTrunk/event_logs)
 --no-tail               skip log tail (RDIO uploads only)
 --no-whisper            skip transcription worker
 --fresh                 wipe DB + audio_calls/ on startup
 ```
+
+**The default bind is `0.0.0.0`, so the dashboard is reachable from your whole
+network, not just localhost** — which is what lets SDRTrunk upload from another
+machine, and what makes it work in Docker. There is no login: anyone who can
+reach the port gets the audio, transcripts and radio directories. If SDRTrunk
+runs on the same box, bind it back to localhost:
+
+```bash
+./scripts/start.sh --host 127.0.0.1
+```
+
+Otherwise keep it on a trusted network, and set `SDRTD_RDIO_KEY` so at least
+the upload endpoint requires a key.
 
 ## Data locations
 
@@ -312,8 +326,8 @@ Do this in order the first time, before letting the autopilot near a machine.
 ### Radio autopilot (plug-and-play HackRFs)
 
 Run `scripts/radio-autopilot.py` every 60s (LaunchAgent, systemd timer, or
-cron) and HackRFs become plug-and-play. Each run counts the radios on the USB
-bus and applies `config/radio_plan.json`:
+cron) and HackRFs become plug-and-play. Each run enumerates the radios on the
+USB bus and applies `config/radio_plan.json`:
 
 - Pinned slots claim their radio; the rest are filled with whatever radios
   are left, in `uniqueID` order. Any radio past the last slot is left alone.
@@ -342,12 +356,6 @@ Requires the sudoers entry (`sudo bash scripts/install-sudoers.sh`, with
 `SDRTRUNK_BIN` set if your launcher isn't at the default path). This is the
 only part of the project that ever writes to SDRTrunk's config, and it always
 makes a timestamped backup first.
-
-Check what the plan resolves to, and what the box can currently see:
-
-```bash
-./.venv/bin/python scripts/radio_plan.py
-```
 
 ### Running the radio scripts remotely
 
