@@ -1,0 +1,22 @@
+services:
+  trunk-tap:
+    build: .
+    ports:
+      - "5544:5544"
+    volumes:
+      - ./data:/data
+      # Your identity/coverage config (copy the *.example.json files in
+      # config/ and edit). Read-only on purpose -- the app never writes here.
+      - ./config:/app/config:ro
+      # SDRTrunk on the same host? Mount its dirs read-only to enable the
+      # live event-log tail and playlist alias import:
+      # - ~/SDRTrunk/event_logs:/sdrtrunk/event_logs:ro
+      # - ~/SDRTrunk/playlist:/sdrtrunk/playlist:ro
+      # - ~/SDRTrunk/configuration:/sdrtrunk/configuration:ro
+    environment:
+      TZ: UTC
+      # Set to require an API key on /api/call-upload (must match SDRTrunk):
+      # SDRTD_RDIO_KEY: change-me
+      # Whisper model (default ggml-small.en.bin; tiny.en/base.en also work):
+      # WHISPER_MODEL_NAME: ggml-base.en.bin
+    restart: unless-stopped

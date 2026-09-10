@@ -1,0 +1,12 @@
+{
+  "comment": "Copy this file to systems.json and edit for your systems. canonical_rules fold SDRTrunk's site-specific event-log names into one network identity, in order: each rule is either an exact-name map or a prefix match. Anything unmatched passes through unchanged. rr_sids maps canonical system names to RadioReference system ids (https://www.radioreference.com/db/sid/<id>) so the UI can deep-link to RR.",
+  "canonical_rules": [
+    { "exact": { "County P25 Control": "Countywide" } },
+    { "prefix": "County P25", "canonical": "Countywide" },
+    { "prefix": "STATEP25 ", "canonical": "State P25" }
+  ],
+  "rr_sids": {
+    "Countywide": 1234,
+    "State P25": 5678
+  }
+}

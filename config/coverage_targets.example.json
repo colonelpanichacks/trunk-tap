@@ -1,0 +1,17 @@
+{
+  "comment": "Coverage targets for the TUNERS tab. freqs in MHz. Each target is checked against every configured tuner's receive window (center +/- sample_rate/2); covered targets show in the UI. status is free text ('observed live' = seen in our own event logs, 'RadioReference' = from the RR DB).",
+  "targets": [
+    {
+      "name": "County P25 simulcast (700 MHz)",
+      "kind": "trunked P25",
+      "freqs": [770.0, 773.5],
+      "status": "RadioReference"
+    },
+    {
+      "name": "City Fire dispatch",
+      "kind": "conventional FMN",
+      "freqs": [851.0],
+      "status": "RadioReference"
+    }
+  ]
+}

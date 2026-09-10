@@ -1,0 +1,9 @@
+flask>=3.0
+flask-socketio>=5.3
+simple-websocket>=1.0
+watchdog>=4.0
+python-dateutil>=2.9
+# Whisper backend (Apple Silicon, recommended)
+mlx-whisper>=0.4 ; platform_system == "Darwin" and platform_machine == "arm64"
+# CPU fallback (slower). Uncomment if you don't have mlx-whisper or whisper.cpp.
+# openai-whisper>=20240930
