@@ -3,12 +3,14 @@
 Radio autopilot: makes HackRFs plug-and-play with SDRTrunk.
 
 Every run (via LaunchAgent / systemd timer / cron, once a minute):
-  1. Count HackRFs on the USB bus (ioreg on macOS, sysfs or lsusb on Linux).
-  2. Require the count to be stable across two samples (anti-flap).
+  1. Enumerate HackRFs on the USB bus by serial (ioreg on macOS, sysfs on
+     Linux; falls back to a plain count when serials aren't readable).
+  2. Require the bus to be stable across two samples (anti-flap).
   3. Apply config/radio_plan.json if reality differs from config:
-       - each HackRF, in uniqueID order, gets the matching plan slot
-         (frequency, sample rate, and that slot's gain profile -- or the
-         radio's own `overrides` entry when it has one)
+       - a slot with a "uniqueID" claims that radio; the rest are filled
+         with whatever radios are left, in uniqueID order. Each gets the
+         slot's frequency, sample rate and gain -- or the radio's own
+         `overrides` entry when it has one
        - a playlist channel is enabled when at least one of its frequencies
          falls inside the receive window of a radio that is actually present,
          and disabled when nothing can hear it
@@ -30,8 +32,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from radio_plan import (PlanError, apply_settings, covers, hackrf_count,  # noqa: E402
-                        hackrfs_in, load_plan, slot_for)
+from radio_plan import (PlanError, apply_settings, assign_slots, covers,  # noqa: E402
+                        hackrf_serials, hackrfs_in, load_plan, needs_change,
+                        unmatched_pins, usable_serials)
 
 HOME = Path.home()
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,14 +60,16 @@ def log(msg):
         pass
 
 
-def stable_count():
-    a = hackrf_count()
+def stable_bus():
+    """(serials_or_None, count) once the bus holds still, else None."""
+    a = hackrf_serials()
     time.sleep(10)
-    b = hackrf_count()
-    if a != b:
-        log(f"USB count flapping ({a} -> {b}); skipping this round")
+    b = hackrf_serials()
+    na, nb = (len(a) if a is not None else -1), (len(b) if b is not None else -1)
+    if na != nb or (a is not None and sorted(a) != sorted(b)):
+        log(f"USB flapping ({na} -> {nb}); skipping this round")
         return None
-    return a
+    return a, (na if na >= 0 else 0)
 
 
 def sdrtrunk_running():
@@ -102,22 +107,27 @@ def channel_freqs(ch):
     return freqs
 
 
-def plan_diff(plan, n_radios):
+def plan_diff(plan, serials, n_radios):
     """Return (tuner_changes, playlist_changes, data, tree) -- what needs editing."""
     data = json.loads(TUNER_CFG.read_text())
     hackrfs = hackrfs_in(data)
+    matched = usable_serials(serials)
+
+    for pin in unmatched_pins(plan, hackrfs):
+        log(f"WARNING: slot pinned to {pin}, which matches no radio in SDRTrunk's "
+            f"config -- that slot will be filled by whichever radio is spare")
 
     tuner_changes = []
     live_windows = []
-    for i, t in enumerate(hackrfs):
-        settings = slot_for(plan, i, t.get("uniqueID"))
+    for i, (t, settings, live) in enumerate(assign_slots(plan, hackrfs, matched)):
         if settings is None:
             continue
         # Only radios actually on the bus can hear anything, so only their
-        # windows decide which playlist channels stay enabled.
-        if i < n_radios:
+        # windows decide which playlist channels stay enabled. With readable
+        # serials we know exactly which; otherwise assume the first N.
+        if live if matched is not None else i < n_radios:
             live_windows.append(settings)
-        if any(t.get(k) != v for k, v in settings.items() if k != "band"):
+        if needs_change(t, settings):
             tuner_changes.append((t, settings))
 
     tree = ET.parse(PLAYLIST)
@@ -157,9 +167,17 @@ def apply_plan(tuner_changes, playlist_changes, data, tree):
 def main():
     plan = load_plan()
 
-    n = stable_count()
-    if n is None or n == 0:
+    bus = stable_bus()
+    if bus is None:
         return
+    serials, n = bus
+    if n == 0:
+        return
+    hackrf_configs = hackrfs_in(json.loads(TUNER_CFG.read_text()))
+    if n > len(hackrf_configs):
+        log(f"{n} radios on the bus but only {len(hackrf_configs)} in SDRTrunk's "
+            f"config -- start SDRTrunk once with every radio attached so it "
+            f"writes a config for each")
 
     state = {}
     if STATE.exists():
@@ -168,7 +186,7 @@ def main():
         except json.JSONDecodeError:
             pass
 
-    tuner_changes, playlist_changes, data, tree = plan_diff(plan, n)
+    tuner_changes, playlist_changes, data, tree = plan_diff(plan, serials, n)
     if not tuner_changes and not playlist_changes:
         return
 

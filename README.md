@@ -167,9 +167,17 @@ The event-log tail is automatic — the dashboard watches
   gitignored) — the band plan the radio scripts apply. Each slot is one
   tuner's centre frequency, sample rate, and gain profile (`amp`, `lna`
   0-40 in steps of 8, `vga` 0-62 in steps of 2). Add a slot to use a third
-  radio. `overrides` keys a gain profile by HackRF `uniqueID` so one radio
-  on a different antenna can run hotter or colder than its slot — useful
-  when a strong nearby site overloads the front end at the shared gain.
+  radio.
+  - Give a slot a `uniqueID` to **pin** it to one specific radio, so the
+    HackRF on your 700 MHz antenna always gets the 700 MHz slot instead of
+    whatever the serial sort order happens to produce. Copy the value out of
+    SDRTrunk's `tuner_configuration.json`; hyphenated and bare hex forms both
+    match. Unpinned slots are filled with the remaining radios in `uniqueID`
+    order, and a pin that matches nothing is reported rather than silently
+    ignored.
+  - `overrides` keys a gain profile by `uniqueID` and wins over the slot's
+    gain, so one radio on a different antenna can run hotter or colder —
+    useful when a strong nearby site overloads the front end at shared gain.
 - **Environment variables**:
   - `SDRTD_DATA_DIR` — root for the DB and `audio_calls/` (default: project
     dir; `/data` in Docker)
@@ -261,8 +269,12 @@ Run `scripts/radio-autopilot.py` every 60s (LaunchAgent, systemd timer, or
 cron) and HackRFs become plug-and-play. Each run counts the radios on the USB
 bus and applies `config/radio_plan.json`:
 
-- Radios are matched to plan slots in `uniqueID` order — 1st radio gets slot
-  0, 2nd slot 1, 3rd slot 2. Any radio past the last slot is left alone.
+- Pinned slots claim their radio; the rest are filled with whatever radios
+  are left, in `uniqueID` order. Any radio past the last slot is left alone.
+- Radios are identified by USB serial, so the autopilot knows *which* radio
+  was unplugged rather than just how many remain — pull the 700 MHz radio and
+  only the 700 MHz channels go quiet. Where serials can't be read it falls
+  back to counting.
 - A playlist channel is enabled when at least one of its frequencies falls
   inside the receive window of a radio that is **actually plugged in**, and
   disabled when nothing can hear it — so SDRTrunk stops logging "No Tuner
@@ -271,7 +283,13 @@ bus and applies `config/radio_plan.json`:
 - Channels outside every slot's band are never touched, so a conventional
   VHF channel fed by a separate RTL-SDR keeps running.
 
-Anti-flap: acts only on a stable radio count, max one restart per 5 min.
+It also warns when more radios are plugged in than SDRTrunk has configs for
+— SDRTrunk writes one config per serial the first time it sees a radio, and
+the scripts only ever edit configs that already exist, so a brand-new third
+radio needs SDRTrunk started once with everything attached before the plan
+can reach it.
+
+Anti-flap: acts only on a stable bus, max one restart per 5 min.
 Log: `logs/radio-autopilot.log`.
 
 Requires the sudoers entry (`sudo bash scripts/install-sudoers.sh`, with

@@ -3,9 +3,9 @@
 Auto-tune every HackRF in SDRTrunk's tuner_configuration.json to the band plan
 in config/radio_plan.json.
 
-Radios are matched to plan slots in uniqueID order -- 1st radio gets slot 0,
-2nd slot 1, 3rd slot 2 -- and any radio past the last slot is left untouched.
-Gain comes from the slot, or from that radio's `overrides` entry if it has one.
+A slot with a "uniqueID" claims that radio; the rest are filled with whatever
+radios are left, in uniqueID order. Any radio past the last slot is left
+untouched. Gain comes from the slot, or from that radio's `overrides` entry.
 See config/radio_plan.example.json.
 
 Safe to run repeatedly. Stops SDRTrunk first if it's running (so it doesn't
@@ -25,8 +25,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from radio_plan import (PlanError, apply_settings, hackrfs_in, load_plan,  # noqa: E402
-                        rate_hz, slot_for)
+from radio_plan import (PlanError, apply_settings, assign_slots, hackrf_serials,  # noqa: E402
+                        hackrfs_in, load_plan, rate_hz, unmatched_pins)
 
 SDRTRUNK_HOME = Path(os.environ.get("SDRTRUNK_HOME", Path.home() / "SDRTrunk"))
 CFG = SDRTRUNK_HOME / "configuration" / "tuner_configuration.json"
@@ -73,11 +73,22 @@ def tune(dry_run=False, no_restart=False):
 
     data = json.loads(CFG.read_text())
     hackrfs = hackrfs_in(data)
-    print(f"[tune] {len(hackrfs)} HackRF(s) found, {len(plan['slots'])} slot(s) in plan")
+    serials = hackrf_serials()
+    on_bus = len(serials) if serials is not None else None
+    print(f"[tune] {len(hackrfs)} HackRF(s) in config, {len(plan['slots'])} slot(s) in plan"
+          + (f", {on_bus} on the USB bus" if on_bus is not None else ""))
+    if on_bus is not None and on_bus > len(hackrfs):
+        print(f"[tune] WARNING: {on_bus} radios plugged in but only {len(hackrfs)} in "
+              f"SDRTrunk's config -- start SDRTrunk once with every radio attached "
+              f"so it writes a config for each, then re-run")
 
-    for i, tuner in enumerate(hackrfs):
+    for pin in unmatched_pins(plan, hackrfs):
+        print(f"[tune] WARNING: slot pinned to {pin}, which matches no radio in "
+              f"SDRTrunk's config -- that slot will be filled by whichever radio "
+              f"is spare; check the uniqueID")
+
+    for i, (tuner, settings, _live) in enumerate(assign_slots(plan, hackrfs, serials)):
         uid = tuner.get("uniqueID")
-        settings = slot_for(plan, i, uid)
         if settings is None:
             print(f"  #{i+1} {uid} -> LEFT UNTOUCHED (no plan slot)")
             continue
@@ -85,6 +96,7 @@ def tune(dry_run=False, no_restart=False):
         apply_settings(tuner, settings)
         half = rate_hz(settings["sampleRate"]) / 2
         tag = " (gain override)" if uid in plan["overrides"] else ""
+        tag += " (pinned)" if settings.get("pin") else ""
         print(f"  #{i+1} {uid} -> {settings['band']} "
               f"({settings['frequency']/1e6:.3f} MHz, {settings['sampleRate']}, "
               f"{(settings['frequency']-half)/1e6:.2f}-{(settings['frequency']+half)/1e6:.2f}); "
