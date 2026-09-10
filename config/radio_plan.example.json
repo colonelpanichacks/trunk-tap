@@ -1,0 +1,36 @@
+{
+  "comment": "Copy to radio_plan.json and edit. Slots are assigned to HackRFs in uniqueID order: 1st radio gets slot 0, 2nd gets slot 1, and so on. Extra radios beyond the last slot are left untouched. Each slot is one tuner's receive window: center freq_hz +/- sample_rate/2. lna is the HackRF LNA (IF) gain in dB, 0-40 in steps of 8; vga is the baseband gain in dB, 0-62 in steps of 2; amp is the front-end amplifier. Raise gain for weak simulcast, drop amp and lna for a strong nearby site that overloads the front end. overrides keys are HackRF uniqueIDs (as they appear in SDRTrunk's tuner_configuration.json) and win over the slot's gain, so one radio on a different antenna can be tuned independently of the band plan.",
+  "slots": [
+    {
+      "band": "700 MHz",
+      "freq_hz": 772000000,
+      "sample_rate": "RATE_10_0",
+      "amp": true,
+      "lna": 24,
+      "vga": 30
+    },
+    {
+      "band": "800 MHz lower",
+      "freq_hz": 855000000,
+      "sample_rate": "RATE_10_0",
+      "amp": true,
+      "lna": 24,
+      "vga": 30
+    },
+    {
+      "band": "800 MHz upper / NPSPAC interop",
+      "freq_hz": 864000000,
+      "sample_rate": "RATE_10_0",
+      "amp": true,
+      "lna": 24,
+      "vga": 30
+    }
+  ],
+  "overrides": {
+    "PUT-A-HACKRF-UNIQUEID-HERE": {
+      "amp": false,
+      "lna": 16,
+      "vga": 22
+    }
+  }
+}

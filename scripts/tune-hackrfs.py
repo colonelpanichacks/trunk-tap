@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
 """
-Auto-tune every HackRF in ~/SDRTrunk/configuration/tuner_configuration.json
-for optimal 700/800 MHz P25 trunked-system coverage.
+Auto-tune every HackRF in SDRTrunk's tuner_configuration.json to the band plan
+in config/radio_plan.json.
 
-Assignment strategy:
-  1st HackRF (by unique-id sort)  ->  772 MHz center, 10 MHz sample rate
-      (covers 767-777 MHz: the 700 MHz band where most P25 simulcasts live)
-  2nd HackRF                       ->  855 MHz center, 10 MHz sample rate
-      (covers 850-860 MHz: the 800 MHz band -- more trunked sites plus
-       800 MHz Interop 8CALL90/8TAC91-94)
-  3rd+ HackRFs                     ->  left untouched
-
-Adjust PLAN below (or the band centers) to fit your 700 MHz trunked systems.
-
-Also sets amplifier=on, LNA=24, VGA=30 (good gain profile for weak simulcast),
-autoPPMCorrectionEnabled=true.
+Radios are matched to plan slots in uniqueID order -- 1st radio gets slot 0,
+2nd slot 1, 3rd slot 2 -- and any radio past the last slot is left untouched.
+Gain comes from the slot, or from that radio's `overrides` entry if it has one.
+See config/radio_plan.example.json.
 
 Safe to run repeatedly. Stops SDRTrunk first if it's running (so it doesn't
 overwrite our edits on quit), then relaunches it if we killed it.
 
 Set SDRTRUNK_BIN to your sdr-trunk launcher path if the default
-(/Applications/sdr-trunk/bin/sdr-trunk) doesn't match your install.
+(/Applications/sdr-trunk/bin/sdr-trunk) doesn't match your install, and
+SDRTRUNK_HOME if SDRTrunk's home dir isn't ~/SDRTrunk.
 """
 import argparse
 import json
@@ -31,14 +24,14 @@ import sys
 import time
 from pathlib import Path
 
-CFG = Path.home() / "SDRTrunk" / "configuration" / "tuner_configuration.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from radio_plan import (PlanError, apply_settings, hackrfs_in, load_plan,  # noqa: E402
+                        rate_hz, slot_for)
+
+SDRTRUNK_HOME = Path(os.environ.get("SDRTRUNK_HOME", Path.home() / "SDRTrunk"))
+CFG = SDRTRUNK_HOME / "configuration" / "tuner_configuration.json"
 SDRTRUNK_BIN = os.environ.get(
     "SDRTRUNK_BIN", "/Applications/sdr-trunk/bin/sdr-trunk")
-
-PLAN = [
-    dict(band="700 MHz", freq=772_000_000, rate="RATE_10_0"),
-    dict(band="800 MHz", freq=855_000_000, rate="RATE_10_0"),
-]
 
 
 def kill_sdrtrunk():
@@ -66,6 +59,7 @@ def launch_sdrtrunk():
 def tune(dry_run=False, no_restart=False):
     if not CFG.exists():
         print(f"config not found: {CFG}", file=sys.stderr); sys.exit(1)
+    plan = load_plan()
 
     was_running = False
     if not no_restart:
@@ -78,27 +72,25 @@ def tune(dry_run=False, no_restart=False):
     print(f"[tune] backup: {backup.name}")
 
     data = json.loads(CFG.read_text())
-    hackrfs = [t for t in data.get("tunerConfigurations", [])
-               if t.get("type") == "hackRFTunerConfiguration"]
-    hackrfs.sort(key=lambda t: t.get("uniqueID", ""))
-    print(f"[tune] {len(hackrfs)} HackRF(s) found")
+    hackrfs = hackrfs_in(data)
+    print(f"[tune] {len(hackrfs)} HackRF(s) found, {len(plan['slots'])} slot(s) in plan")
 
     for i, tuner in enumerate(hackrfs):
-        plan = PLAN[i] if i < len(PLAN) else None
-        if plan is None:
-            print(f"  #{i+1} {tuner.get('uniqueID')} -> LEFT UNTOUCHED (no plan slot)")
+        uid = tuner.get("uniqueID")
+        settings = slot_for(plan, i, uid)
+        if settings is None:
+            print(f"  #{i+1} {uid} -> LEFT UNTOUCHED (no plan slot)")
             continue
-        old_f = tuner.get("frequency")
-        old_r = tuner.get("sampleRate")
-        tuner["frequency"] = plan["freq"]
-        tuner["sampleRate"] = plan["rate"]
-        tuner["amplifierEnabled"] = True
-        tuner["lnagain"] = "GAIN_24"
-        tuner["vgagain"] = "GAIN_30"
-        tuner["autoPPMCorrectionEnabled"] = True
-        print(f"  #{i+1} {tuner.get('uniqueID')} -> {plan['band']} "
-              f"({plan['freq']/1e6:.3f} MHz, {plan['rate']}); "
-              f"was {old_f/1e6:.3f} MHz {old_r}")
+        old_f, old_r = tuner.get("frequency"), tuner.get("sampleRate")
+        apply_settings(tuner, settings)
+        half = rate_hz(settings["sampleRate"]) / 2
+        tag = " (gain override)" if uid in plan["overrides"] else ""
+        print(f"  #{i+1} {uid} -> {settings['band']} "
+              f"({settings['frequency']/1e6:.3f} MHz, {settings['sampleRate']}, "
+              f"{(settings['frequency']-half)/1e6:.2f}-{(settings['frequency']+half)/1e6:.2f}); "
+              f"amp={settings['amplifierEnabled']} "
+              f"{settings['lnagain']}/{settings['vgagain']}{tag}; "
+              f"was {(old_f or 0)/1e6:.3f} MHz {old_r}")
 
     if dry_run:
         print("[tune] --dry-run: not writing")
@@ -116,7 +108,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-restart", action="store_true",
                     help="don't kill/relaunch SDRTrunk")
-    tune(**vars(ap.parse_args()))
+    try:
+        tune(**vars(ap.parse_args()))
+    except PlanError as e:
+        print(e, file=sys.stderr); sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -16,4 +16,5 @@ db/*.db-wal
 db/*.bak
 config/systems.json
 config/coverage_targets.json
+config/radio_plan.json
 *.out

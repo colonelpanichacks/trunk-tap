@@ -50,7 +50,7 @@ ok "$PLATFORM ($ARCH)"
 
 # ---- config bootstrap (shared by local and docker modes) ----------------------
 step "Bootstrapping config"
-for f in systems coverage_targets; do
+for f in systems coverage_targets radio_plan; do
   if [ ! -f "config/$f.json" ]; then
     cp "config/$f.example.json" "config/$f.json"
     ok "created config/$f.json from the example -- edit it for your systems"

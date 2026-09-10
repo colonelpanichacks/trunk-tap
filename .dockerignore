@@ -13,6 +13,7 @@ db/*.db-*
 audio_calls
 config/systems.json
 config/coverage_targets.json
+config/radio_plan.json
 .scratch
 Dockerfile
 docker-compose.yml

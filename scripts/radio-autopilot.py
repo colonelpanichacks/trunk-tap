@@ -2,19 +2,23 @@
 """
 Radio autopilot: makes HackRFs plug-and-play with SDRTrunk.
 
-Every run (via LaunchAgent, once a minute):
-  1. Count HackRFs on the USB bus (ioreg).
+Every run (via LaunchAgent / systemd timer / cron, once a minute):
+  1. Count HackRFs on the USB bus (ioreg on macOS, sysfs or lsusb on Linux).
   2. Require the count to be stable across two samples (anti-flap).
-  3. Apply the radio plan if reality differs from config:
-       1 radio  -> every tuner config at 772 MHz (700 MHz block);
-                   all-800 MHz playlist channels disabled.
-       2+ radios -> 1st tuner (by uniqueID) 772 MHz, rest 855 MHz;
-                   all-800 MHz playlist channels enabled.
+  3. Apply config/radio_plan.json if reality differs from config:
+       - each HackRF, in uniqueID order, gets the matching plan slot
+         (frequency, sample rate, and that slot's gain profile -- or the
+         radio's own `overrides` entry when it has one)
+       - a playlist channel is enabled when at least one of its frequencies
+         falls inside the receive window of a radio that is actually present,
+         and disabled when nothing can hear it
   4. If anything changed: restart SDRTrunk so it picks the config up
      (kill first, THEN write, so SDRTrunk can't clobber edits on exit).
 
 Idempotent: if config already matches the plan, does nothing.
 Cooldown: at most one SDRTrunk restart per 5 minutes.
+
+Env: SDRTRUNK_HOME (default ~/SDRTrunk), SDRTRUNK_BIN, SDRTD_RADIO_PLAN.
 """
 import json
 import os
@@ -25,18 +29,21 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from radio_plan import (PlanError, apply_settings, covers, hackrf_count,  # noqa: E402
+                        hackrfs_in, load_plan, slot_for)
+
 HOME = Path.home()
 ROOT = Path(__file__).resolve().parents[1]
-TUNER_CFG = HOME / "SDRTrunk" / "configuration" / "tuner_configuration.json"
-PLAYLIST = HOME / "SDRTrunk" / "playlist" / "default.xml"
+SDRTRUNK_HOME = Path(os.environ.get("SDRTRUNK_HOME", HOME / "SDRTrunk"))
+TUNER_CFG = SDRTRUNK_HOME / "configuration" / "tuner_configuration.json"
+PLAYLIST = SDRTRUNK_HOME / "playlist" / "default.xml"
 STATE = ROOT / "logs" / "radio-autopilot-state.json"
 LOG = ROOT / "logs" / "radio-autopilot.log"
 SDRTRUNK_BIN = os.environ.get(
     "SDRTRUNK_BIN", "/Applications/sdr-trunk/bin/sdr-trunk")
 
 COOLDOWN_SEC = 300
-FREQ_700 = 772_000_000
-FREQ_800 = 855_000_000
 
 
 def log(msg):
@@ -48,12 +55,6 @@ def log(msg):
             f.write(line + "\n")
     except OSError:
         pass
-
-
-def hackrf_count():
-    out = subprocess.run(["ioreg", "-p", "IOUSB", "-l", "-w", "0"],
-                         capture_output=True, text=True).stdout
-    return out.count("HackRF One@")
 
 
 def stable_count():
@@ -72,18 +73,20 @@ def sdrtrunk_running():
     return bool(r.stdout.strip())
 
 
-def restart_sdrtrunk():
-    subprocess.run(["sudo", "-n", "/usr/bin/pkill", "-f",
+def kill_sdrtrunk():
+    subprocess.run(["sudo", "-n", "pkill", "-f",
                     "io.github.dsheirer.gui.SDRTrunk"], capture_output=True)
     for _ in range(20):
         if not sdrtrunk_running():
-            break
+            return
         time.sleep(1)
+
+
+def launch_sdrtrunk():
     subprocess.Popen(
         ["sudo", "-n", f"SDR_TRUNK_OPTS=-Duser.home={HOME}", str(SDRTRUNK_BIN)],
         stdout=open("/tmp/sdrtrunk-launch.log", "wb"),
         stderr=subprocess.STDOUT, start_new_session=True)
-    log("SDRTrunk restarted")
 
 
 def channel_freqs(ch):
@@ -99,44 +102,47 @@ def channel_freqs(ch):
     return freqs
 
 
-def plan_ok(n_radios):
-    """Return (ok, tuner_changes, playlist_changes) describing needed edits."""
-    tuner_changes = []
-    playlist_changes = []
-
+def plan_diff(plan, n_radios):
+    """Return (tuner_changes, playlist_changes, data, tree) -- what needs editing."""
     data = json.loads(TUNER_CFG.read_text())
-    hackrfs = sorted((t for t in data.get("tunerConfigurations", [])
-                      if t.get("type") == "hackRFTunerConfiguration"),
-                     key=lambda t: t.get("uniqueID", ""))
+    hackrfs = hackrfs_in(data)
+
+    tuner_changes = []
+    live_windows = []
     for i, t in enumerate(hackrfs):
-        want = FREQ_700 if (n_radios >= 2 and i == 0) or n_radios < 2 else FREQ_800
-        if n_radios >= 2 and i > 0:
-            want = FREQ_800
-        if t.get("frequency") != want:
-            tuner_changes.append((t, want))
+        settings = slot_for(plan, i, t.get("uniqueID"))
+        if settings is None:
+            continue
+        # Only radios actually on the bus can hear anything, so only their
+        # windows decide which playlist channels stay enabled.
+        if i < n_radios:
+            live_windows.append(settings)
+        if any(t.get(k) != v for k, v in settings.items() if k != "band"):
+            tuner_changes.append((t, settings))
 
     tree = ET.parse(PLAYLIST)
+    playlist_changes = []
     for ch in tree.getroot().iter("channel"):
         freqs = channel_freqs(ch)
-        if freqs and all(f > 800_000_000 for f in freqs):
-            want_enabled = n_radios >= 2
-            is_enabled = ch.get("enabled", "true") != "false"
-            if is_enabled != want_enabled:
-                playlist_changes.append((ch, want_enabled))
+        # Only touch channels inside a band this plan is responsible for --
+        # anything else is presumably fed by a tuner we don't manage (an
+        # RTL-SDR on VHF, say), and disabling it would silence that receiver.
+        if not freqs or not any(covers(w, f) for w in plan["slots"] for f in freqs):
+            continue
+        want_enabled = any(covers(w, f) for w in live_windows for f in freqs)
+        is_enabled = ch.get("enabled", "true") != "false"
+        if is_enabled != want_enabled:
+            playlist_changes.append((ch, want_enabled))
 
-    return (not tuner_changes and not playlist_changes,
-            tuner_changes, playlist_changes, data, tree)
+    return tuner_changes, playlist_changes, data, tree
 
 
 def apply_plan(tuner_changes, playlist_changes, data, tree):
-    for t, want in tuner_changes:
-        t["frequency"] = want
-        t["sampleRate"] = "RATE_10_0"
-        t["amplifierEnabled"] = True
-        t["lnagain"] = "GAIN_24"
-        t["vgagain"] = "GAIN_30"
-        t["autoPPMCorrectionEnabled"] = True
-        log(f"tuner {t.get('uniqueID')} -> {want/1e6:.1f} MHz")
+    for t, settings in tuner_changes:
+        apply_settings(t, settings)
+        log(f"tuner {t.get('uniqueID')} -> {settings['band']} "
+            f"{settings['frequency']/1e6:.1f} MHz amp={settings['amplifierEnabled']} "
+            f"{settings['lnagain']}/{settings['vgagain']}")
     for ch, enabled in playlist_changes:
         ch.set("enabled", "true" if enabled else "false")
         log(f"channel {ch.get('name')} enabled={enabled}")
@@ -149,6 +155,8 @@ def apply_plan(tuner_changes, playlist_changes, data, tree):
 
 
 def main():
+    plan = load_plan()
+
     n = stable_count()
     if n is None or n == 0:
         return
@@ -160,8 +168,8 @@ def main():
         except json.JSONDecodeError:
             pass
 
-    ok, tuner_changes, playlist_changes, data, tree = plan_ok(n)
-    if ok:
+    tuner_changes, playlist_changes, data, tree = plan_diff(plan, n)
+    if not tuner_changes and not playlist_changes:
         return
 
     last_restart = state.get("last_restart", 0)
@@ -174,22 +182,19 @@ def main():
     was_running = sdrtrunk_running()
     if was_running:
         # Kill FIRST so SDRTrunk can't overwrite our edits on exit.
-        subprocess.run(["sudo", "-n", "/usr/bin/pkill", "-f",
-                        "io.github.dsheirer.gui.SDRTrunk"], capture_output=True)
-        for _ in range(20):
-            if not sdrtrunk_running():
-                break
-            time.sleep(1)
+        kill_sdrtrunk()
     apply_plan(tuner_changes, playlist_changes, data, tree)
     if was_running:
-        subprocess.Popen(
-            ["sudo", "-n", f"SDR_TRUNK_OPTS=-Duser.home={HOME}", str(SDRTRUNK_BIN)],
-            stdout=open("/tmp/sdrtrunk-launch.log", "wb"),
-            stderr=subprocess.STDOUT, start_new_session=True)
+        launch_sdrtrunk()
         log("SDRTrunk relaunched with new plan")
 
+    STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps({"last_restart": time.time(), "radios": n}))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except PlanError as e:
+        log(str(e))
+        sys.exit(1)

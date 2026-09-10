@@ -85,8 +85,9 @@ cd trunk-tap
 The installer checks for Python ≥ 3.10 (with per-platform install hints if
 it's missing), creates `.venv/` and installs the dependencies, sets up a
 Whisper transcription backend where it can, and bootstraps your local
-`config/systems.json` and `config/coverage_targets.json` from the shipped
-examples (both gitignored, so your presets stay private). It's idempotent —
+`config/systems.json`, `config/coverage_targets.json` and
+`config/radio_plan.json` from the shipped examples (all gitignored, so your
+presets stay private). It's idempotent —
 safe to re-run. Flags: `--docker` skips the venv and verifies/prints the
 Docker path instead, `--help` shows usage. Set `TRUNK_TAP_SKIP_WHISPER=1` to
 skip the Whisper backend step.
@@ -162,6 +163,13 @@ The event-log tail is automatic — the dashboard watches
     UI can deep-link to RR (`"Countywide": 1234`, `"State P25": 5678`).
 - **`config/coverage_targets.json`** (optional, gitignored) — watchlist for
   the TUNERS tab's coverage panel (frequencies in MHz).
+- **`config/radio_plan.json`** (copy from `config/radio_plan.example.json`,
+  gitignored) — the band plan the radio scripts apply. Each slot is one
+  tuner's centre frequency, sample rate, and gain profile (`amp`, `lna`
+  0-40 in steps of 8, `vga` 0-62 in steps of 2). Add a slot to use a third
+  radio. `overrides` keys a gain profile by HackRF `uniqueID` so one radio
+  on a different antenna can run hotter or colder than its slot — useful
+  when a strong nearby site overloads the front end at the shared gain.
 - **Environment variables**:
   - `SDRTD_DATA_DIR` — root for the DB and `audio_calls/` (default: project
     dir; `/data` in Docker)
@@ -241,27 +249,70 @@ If a DB already has split identities for one network, repair it with:
 | `scripts/wipe.sh` | Wipe dashboard DB + audio (`--all-logs` also nukes SDRTrunk event logs) |
 | `scripts/patch_playlist.py` | Add an RDIO Scanner streaming target to SDRTrunk's playlist and tag every alias |
 | `scripts/merge-systems.py` | Merge split system identities in the DB into one canonical system |
-| `scripts/tune-hackrfs.py` | Auto-tune every HackRF in SDRTrunk's tuner config for 700/800 MHz P25 coverage |
+| `scripts/tune-hackrfs.py` | Apply `config/radio_plan.json` to every HackRF in SDRTrunk's tuner config |
+| `scripts/radio_plan.py` | Shared band-plan/gain loader; run it directly to print the plan and the radios seen |
 | `scripts/sdrtrunk-launch.sh` | Kill stale SDRTrunk and relaunch with root + user home (needs the sudoers entry) |
 | `scripts/install-sudoers.sh` | One-time sudoers entry for passwordless SDRTrunk launch/kill (validated with `visudo -c`) |
 | `scripts/radio-autopilot.py` | Optional plug-and-play HackRF manager (see below) |
 
 ### Radio autopilot (plug-and-play HackRFs)
 
-A LaunchAgent (run `scripts/radio-autopilot.py` every 60s) watches the USB
-bus:
+Run `scripts/radio-autopilot.py` every 60s (LaunchAgent, systemd timer, or
+cron) and HackRFs become plug-and-play. Each run counts the radios on the USB
+bus and applies `config/radio_plan.json`:
 
-- **1 HackRF** — tuner pinned to 772 MHz (700 MHz block); 800 MHz channels
-  auto-disabled so SDRTrunk stops logging "No Tuner Available".
-- **2nd HackRF plugged in** — within ~2 min it is assigned 855 MHz, the
-  800 MHz channels are re-enabled, and SDRTrunk restarts itself. Unplug it
-  and the plan reverts the same way. Anti-flap: acts only on a stable radio
-  count, max one restart per 5 min. Log: `logs/radio-autopilot.log`.
+- Radios are matched to plan slots in `uniqueID` order — 1st radio gets slot
+  0, 2nd slot 1, 3rd slot 2. Any radio past the last slot is left alone.
+- A playlist channel is enabled when at least one of its frequencies falls
+  inside the receive window of a radio that is **actually plugged in**, and
+  disabled when nothing can hear it — so SDRTrunk stops logging "No Tuner
+  Available". Plug a third radio in and its band's channels come back on
+  their own; unplug it and they go quiet again.
+- Channels outside every slot's band are never touched, so a conventional
+  VHF channel fed by a separate RTL-SDR keeps running.
+
+Anti-flap: acts only on a stable radio count, max one restart per 5 min.
+Log: `logs/radio-autopilot.log`.
 
 Requires the sudoers entry (`sudo bash scripts/install-sudoers.sh`, with
 `SDRTRUNK_BIN` set if your launcher isn't at the default path). This is the
 only part of the project that ever writes to SDRTrunk's config, and it always
 makes a timestamped backup first.
+
+Check what the plan resolves to, and what the box can currently see:
+
+```bash
+./.venv/bin/python scripts/radio_plan.py
+```
+
+### Running the radio scripts remotely
+
+Both radio scripts only edit config files and manage the SDRTrunk process, so
+they work fine over SSH and under cron or a systemd timer — nothing about
+them needs a desktop. Radio detection is portable: `ioreg` on macOS, sysfs
+(falling back to `lsusb`) on Linux.
+
+```cron
+* * * * * cd /path/to/trunk-tap && ./.venv/bin/python scripts/radio-autopilot.py
+```
+
+**SDRTrunk itself is not headless**, though — its main class is literally
+`io.github.dsheirer.gui.SDRTrunk`, and there is no CLI-only mode. On Linux you
+can run it without a desktop under a virtual framebuffer:
+
+```bash
+xvfb-run -a /path/to/sdr-trunk
+```
+
+That drops the display stack but still pays for the JVM and JavaFX, so treat
+it as a modest saving rather than a way to free up a whole core. On macOS this
+doesn't work at all: a GUI app launched from an SSH session never attaches to
+the Aqua session, so the autopilot's relaunch would start something that never
+renders. Drive macOS boxes from a LaunchAgent in the logged-in session.
+
+How many HackRFs one machine can carry is set by USB bandwidth and demod CPU,
+not by the GUI — three radios at 10 MSPS is roughly 120 MB/s, which needs them
+spread across real USB 3 controllers rather than one shared hub.
 
 ### Fresh start
 
